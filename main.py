@@ -11,15 +11,16 @@ import librosa
 from pydub import AudioSegment
 
 # ========= 設定 =========
-folder_path = Path(r"S011101_B3")
-output_csv = folder_path / "S011101_B3_all_transcribed.csv"
+folder_path = Path(r"S01110G_B3")
+output_csv = folder_path / "S01110G_B3_all_transcribed.csv"
+file_head = "G"  # ファイル名の頭部分（例: "04"）
 
 MODEL_NAME = "medium"  # tiny, base, small, medium, large
 DEVICE = "cuda"  # "cuda" or "cpu"
 
-# 対象ファイル名: 01_40_system_5th.mp3 ～ 01_82_system_5th.mp3
-START_NO = 40
-END_NO = 82
+# 対象ファイル名: G_40_system_5th.mp3 ～ G_82_system_5th.mp3
+START_NO = 1
+END_NO = 23
 
 # ---- 音量谷ベース分割設定 ----
 SR = 16000
@@ -44,6 +45,18 @@ NOISE_PHRASES = {
     ("thank you", "for watching!"),
 }
 
+NOISE_JAPANESE_LINES = {
+    (
+        "この文章は 日本語の文章の中で 日本語の文章の中で 日本語の文章の中で "
+        "日本語の文章の中で 日本語の文章の中で 日本語の文章の中で 日本語の文章の中で "
+        "日本語の文章の中で 日本語の文章の中で 日本語の文章の中で 日本語の文章の中で "
+        "日本語の文章の中で 日本語の文章の中で 日本語の文章の中で 日本語の文章の中で "
+        "日本語の文章の中で 日本語の文章の中で 日本語の文章の中で 日本語の文章の中で "
+        "日本語の文章の中で 日本語の文章の中で 日本語の文章の"
+    ),
+    "この文は 日本語での文字の使用方法です",
+}
+
 # ========= 共通正規表現 =========
 EN_JA_PATTERN = re.compile(r"^([A-Za-z][A-Za-z' -]*)\s+(.+)$")
 
@@ -64,6 +77,33 @@ def clean_text(text: str) -> str:
     text = text.replace("、", " ").replace("。", " ")
     text = re.sub(r"\s+", " ", text).strip()
     return text
+
+
+def normalize_english(text: str) -> str:
+    text = text.strip().lower()
+    text = text.replace(".", "").replace("!", "")
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def is_noise_japanese_line(text: str) -> bool:
+    normalized = re.sub(r"\s+", " ", text.strip())
+    return normalized in NOISE_JAPANESE_LINES
+
+
+def fix_particle_wo_for_verbs(eng: str, jap: str) -> str:
+    if not jap.startswith("お"):
+        return jap
+
+    # 動詞訳の可能性が高い場合のみ、先頭「お」を助詞「を」に補正
+    looks_like_verb = (
+        eng.startswith("to ")
+        or "する" in jap
+        or jap.endswith(("る", "う", "く", "ぐ", "す", "つ", "ぬ", "ぶ", "む"))
+    )
+    if looks_like_verb:
+        return "を" + jap[1:]
+    return jap
 
 
 def normalize_japanese(text: str) -> str:
@@ -119,20 +159,22 @@ def extract_rows_from_segments(
         # 1) 「英単語 + 和訳」
         m = EN_JA_PATTERN.match(text)
         if m:
-            eng = m.group(1).strip().lower()
+            eng = normalize_english(m.group(1))
             jap = normalize_japanese(m.group(2).strip())
+            jap = fix_particle_wo_for_verbs(eng, jap)
 
             # 例: knowledge / Nation 国 -> nation / 国
             lead = EN_JA_PATTERN.match(jap)
             if prev_eng_in_rows is not None and eng == prev_eng_in_rows and lead:
-                next_eng = lead.group(1).strip().lower()
+                next_eng = normalize_english(lead.group(1))
                 next_jap = normalize_japanese(lead.group(2).strip())
+                next_jap = fix_particle_wo_for_verbs(next_eng, next_jap)
 
                 if next_eng != eng and is_japanese_like(next_jap):
                     eng = next_eng
                     jap = next_jap
 
-            if jap and not is_english_only(jap):
+            if jap and not is_english_only(jap) and not is_noise_japanese_line(jap):
                 if not is_noise_pair(eng, jap):
                     rows.append((source_file, index_in_file, eng, jap))
                     prev_eng_in_rows = eng
@@ -142,14 +184,19 @@ def extract_rows_from_segments(
 
         # 2) 「英単語だけ」 + 次が「日本語だけ」
         if is_english_only(text):
-            eng = text.lower()
+            eng = normalize_english(text)
 
             if i + 1 < len(raw_texts):
                 next_text = raw_texts[i + 1]
 
                 if is_japanese_like(next_text) and not is_english_only(next_text):
                     jap = normalize_japanese(next_text)
-                    if jap and not is_noise_pair(eng, jap):
+                    jap = fix_particle_wo_for_verbs(eng, jap)
+                    if (
+                        jap
+                        and not is_noise_japanese_line(jap)
+                        and not is_noise_pair(eng, jap)
+                    ):
                         rows.append((source_file, index_in_file, eng, jap))
                         prev_eng_in_rows = eng
                         index_in_file += 1
@@ -159,11 +206,14 @@ def extract_rows_from_segments(
                 # 次が「同じ英単語 + 和訳」
                 m2 = EN_JA_PATTERN.match(next_text)
                 if m2:
-                    next_eng = m2.group(1).strip().lower()
+                    next_eng = normalize_english(m2.group(1))
                     next_jap = normalize_japanese(m2.group(2).strip())
+                    next_jap = fix_particle_wo_for_verbs(next_eng, next_jap)
 
                     if eng == next_eng and next_jap and not is_english_only(next_jap):
-                        if not is_noise_pair(eng, next_jap):
+                        if not is_noise_japanese_line(next_jap) and not is_noise_pair(
+                            eng, next_jap
+                        ):
                             rows.append((source_file, index_in_file, eng, next_jap))
                             prev_eng_in_rows = eng
                             index_in_file += 1
@@ -190,7 +240,7 @@ def extract_rows_from_segments(
 def build_target_files(folder: Path, start_no: int, end_no: int) -> list[Path]:
     files: list[Path] = []
     for i in range(start_no, end_no + 1):
-        file_name = f"01_{i:02d}_system_5th.mp3"
+        file_name = f"{file_head}_{i:02d}_system_5th.mp3"
         files.append(folder / file_name)
     return files
 
