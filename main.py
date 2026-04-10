@@ -268,6 +268,7 @@ def ms_to_frame(ms: int, sr: int, hop_length: int) -> int:
 
 def detect_low_energy_boundaries(audio_path: Path) -> list[int]:
     y, sr = librosa.load(str(audio_path), sr=SR, mono=True)
+    sr = int(sr)
 
     rms = librosa.feature.rms(y=y, frame_length=FRAME_LENGTH, hop_length=HOP_LENGTH)[0]
 
